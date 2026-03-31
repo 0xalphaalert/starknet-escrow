@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<body>
+<button onclick="run()">Declare + Deploy</button>
+
+<script type="module">
+import { connect } from "https://esm.sh/starknetkit";
+
+async function run() {
+  const { wallet } = await connect();
+  const account = wallet.account;
+
+  const response = await fetch("./target/dev/escrow_project_Escrow.contract_class.json");
+  const compiled = await response.json();
+
+  // Declare
+  const declareTx = await account.declare({
+    contract: compiled
+  });
+
+  console.log("Class hash:", declareTx.class_hash);
+
+  // Deploy
+  const deployTx = await account.deployContract({
+    classHash: declareTx.class_hash,
+    constructorCalldata: []
+  });
+
+  alert("Deployed at: " + deployTx.contract_address);
+}
+</script>
+</body>
+</html>

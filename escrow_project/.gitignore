@@ -1,0 +1,10 @@
+# Starknet Private Keys
+keystore.json
+account.json
+starknet_accounts/
+
+# React / Node
+node_modules/
+.env
+.env.local
+target/

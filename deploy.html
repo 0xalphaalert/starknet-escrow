@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Starknet Deploy</title>
+</head>
+<body>
+  <button onclick="deploy()">Deploy Contract</button>
+
+  <script type="module">
+    import { connect } from "https://esm.sh/starknetkit";
+    import { RpcProvider, Account } from "https://esm.sh/starknet";
+
+    async function deploy() {
+      const { wallet } = await connect();
+
+      if (!wallet) {
+        alert("Wallet not connected");
+        return;
+      }
+
+      const provider = new RpcProvider({
+        nodeUrl: "https://starknet-sepolia.public.blastapi.io"
+      });
+
+      const account = wallet.account;
+
+      // ⚠️ You must replace this with your class hash
+      const classHash = "PASTE_YOUR_CLASS_HASH_HERE";
+
+      const { contract_address } = await account.deployContract({
+        classHash: classHash,
+        constructorCalldata: []
+      });
+
+      alert("Deployed at: " + contract_address);
+    }
+  </script>
+</body>
+</html>

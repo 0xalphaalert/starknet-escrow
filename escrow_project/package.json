@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "starknet": "^8.9.2",
+    "starknetkit": "^3.4.3"
+  }
+}
