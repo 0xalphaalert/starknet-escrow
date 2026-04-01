@@ -6,6 +6,7 @@ import { RpcProvider, Contract, uint256, validateAndParseAddress, cairo } from "
 import {
   Search, Heart, ShoppingBag, Minus, Plus, X, ChevronRight, MapPin, Star, Clock, CheckCircle, Receipt
 } from 'lucide-react';
+import { StarkZap } from "starkzap";
 
 const CATEGORIES = [
   { id: 'burger', label: 'Burgers', icon: '🍔' },
@@ -21,7 +22,7 @@ const TAG_STYLES = {
   'New':         'bg-pink-100 text-pink-600',
   'Classic':     'bg-blue-100 text-blue-700',
 };
-const ESCROW_ADDRESS = "0x07e01f41efe6dc68280e3bc03042deebf9ddaf115efa18e20a6a555fb75a0285";
+const ESCROW_ADDRESS = "0x04296b0eb46dd67dd478b72df88e7140ba7e0da3f43dcfd5eac092601c034b0a";
 
 function tagStyle(tag) {
   return TAG_STYLES[tag] ?? 'bg-gray-100 text-gray-600';
@@ -169,28 +170,25 @@ export default function Menu() {
   setIsProcessing(true);
 
   try {
-    // STEP A: Connect to the user's StarkNet wallet (Argent / Braavos)
-    // Check if Argent X or Braavos is installed
-// Directly use window.starknet injected by Argent X / Braavos
-const starknet = window.starknet;
+ // STEP A: Connect to the user's StarkNet wallet (Argent / Braavos)
+    const starknet = window.starknet;
 
-if (!starknet) {
-  alert("Argent X not found. Please install it from https://www.argent.xyz/argent-x/");
-  setIsProcessing(false);
-  return;
-}
+    if (!starknet) {
+      alert("Argent X not found. Please install it from https://www.argent.xyz/argent-x/");
+      setIsProcessing(false);
+      return;
+    }
 
-// 1. Force the wallet to fully connect and inject the executable Account object
-await starknet.enable();
+    // Force the wallet to fully connect
+    await starknet.enable();
+    const account = starknet.account;
 
-// 2. Now 'account' is fully loaded and has the .execute() function!
-const account = starknet.account;
+    if (!account) {
+      alert("Wallet connection failed. Please unlock your Argent X wallet.");
+      setIsProcessing(false);
+      return;
+    }
 
-if (!account) {
-  alert("Wallet connection failed. Please unlock your Argent X wallet.");
-  setIsProcessing(false);
-  return;
-}
 
 
 
@@ -204,6 +202,9 @@ if (!account) {
     // USDC has 6 decimals — convert the dollar amount correctly
     const amountInMicroUSDC = BigInt(Math.round(parseFloat(finalTotal) * 1_000_000));
     const amountUint256 = uint256.bnToUint256(amountInMicroUSDC);
+
+    // 🔥 FIX: Define the order ID globally for the whole transaction right here!
+    const onChainOrderId = Math.floor(Date.now() / 1000);
 
     if (paymentMethod === 'starkzap') {
       console.log(`[StarkNet] Sending ${finalTotal} USDC on Sepolia...`);
@@ -219,18 +220,18 @@ if (!account) {
         ]
       };
 
-      // 2. DEPOSIT into the Escrow contract
+      // (The ID is now generated at the top of the function)
       const depositCall = {
         contractAddress: ESCROW_ADDRESS,
         entrypoint: "deposit",
         calldata: [
-          RESTAURANT_WALLET.toString(), 
+          onChainOrderId.toString(), // Safely uses the global variable
           amountUint256.low.toString(), 
           amountUint256.high.toString()
         ]
       };
 
-      // 3. MULTICALL: Execute Approve and Deposit at the exact same time!
+      /// 3. MULTICALL: Execute Approve and Deposit at the exact same time!
       const tx = await account.execute([approveCall, depositCall]);
       
       console.log("Tx sent to mempool! Skipping wait for demo...", tx.transaction_hash);
@@ -291,6 +292,7 @@ if (!account) {
       status: 'pending_kitchen',
       customer_name: customerName,
       customer_wallet: pickupCode,
+      on_chain_id: onChainOrderId
     }]).select().single();
 
     if (!error) {
@@ -457,8 +459,8 @@ if (!account) {
                   amountsCalldata.push(restU256.low, restU256.high);
 
                   // 4. TRIGGER THE ESCROW RELEASE
-                  // 🔥 THE FIX: Force every single item in the array to be a string!
                   const safeCalldata = [
+                    currentOrder.on_chain_id.toString(), // NEW: Tell contract WHICH box to unlock
                     addresses.length.toString(), 
                     ...addresses.map(addr => addr.toString()),            
                     addresses.length.toString(), 
@@ -466,11 +468,12 @@ if (!account) {
                   ];
 
                   const releaseCall = {
-                    contractAddress: ESCROW_ADDRESS, // Now uses the global address we fixed in Step 1
+                    contractAddress: ESCROW_ADDRESS, 
                     entrypoint: "release_to_payroll",
                     calldata: safeCalldata
                   };
 
+                  // 4. TRIGGER THE ESCROW RELEASE
                   const tx = await account.execute([releaseCall]);
                   console.log("🔥 ESCROW RELEASED 🔥 Hash:", tx.transaction_hash);
                   
