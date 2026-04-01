@@ -3,6 +3,7 @@ import { supabase } from './supabaseClient';
 import { 
   CheckCircle, Clock, Receipt, Star, Wallet, TrendingUp, Award, ExternalLink
 } from 'lucide-react';
+import { uint256 } from "starknet";
 
 // Web3 Block Confirmation Simulator
 const BlockConfirmations = ({ hash, closedAt }) => {
@@ -97,6 +98,82 @@ export default function Kitchen() {
 
   const updateStatus = async (id, newStatus) => {
     await supabase.from('orders').update({ status: newStatus }).eq('id', id);
+  };
+  const handleForceSettle = async (orderToSettle) => {
+    try {
+      const btn = document.getElementById(`settle-btn-${orderToSettle.id}`);
+      if (btn) btn.innerText = "Settling...";
+
+      // 1. Connect the Restaurant/Staff Wallet
+      const starknet = window.starknet;
+      if (!starknet) throw new Error("Argent X not found");
+      await starknet.enable();
+      const account = starknet.account;
+
+      // 2. Math for 5-Star Default (100% of staff maximums)
+      const totalMicroUSDC = BigInt(Math.round(orderToSettle.total_amount * 1_000_000));
+      let totalStaffEarned = 0n;
+      
+      const addresses = [];
+      const amountsCalldata = [];
+      const ROLE_SPLIT = { 'Chef': 22n, 'Customer Service / Quality': 22n, 'Service Crew': 15n, 'Housekeeping': 11n };
+
+      // Automatically give everyone 5 stars
+      staffList.forEach(staff => {
+        const rolePercent = ROLE_SPLIT[staff.role];
+        if (!rolePercent) return;
+
+        const maxShare = (totalMicroUSDC * rolePercent) / 100n;
+        const earnedShare = maxShare; // 5/5 stars = full maximum share
+
+        totalStaffEarned += earnedShare;
+        addresses.push(staff.wallet_address);
+
+        const amountU256 = uint256.bnToUint256(earnedShare);
+        amountsCalldata.push(amountU256.low, amountU256.high);
+      });
+
+      // 3. Restaurant gets the remaining 30%
+      const RESTAURANT_WALLET = "0x0066730A1ad22Ac3e108C6D67ed585A016456B04d2d631aee5489CD9504e79fE";
+      const restaurantPayout = totalMicroUSDC - totalStaffEarned;
+      
+      addresses.push(RESTAURANT_WALLET);
+      const restU256 = uint256.bnToUint256(restaurantPayout);
+      amountsCalldata.push(restU256.low, restU256.high);
+
+      // 4. Trigger the Smart Contract Failsafe
+      const ESCROW_ADDRESS = "0x04296b0eb46dd67dd478b72df88e7140ba7e0da3f43dcfd5eac092601c034b0a";
+      const safeCalldata = [
+        orderToSettle.on_chain_id.toString(), 
+        addresses.length.toString(), 
+        ...addresses.map(addr => addr.toString()),            
+        addresses.length.toString(), 
+        ...amountsCalldata.map(amt => amt.toString())       
+      ];
+
+      const releaseCall = {
+        contractAddress: ESCROW_ADDRESS, 
+        entrypoint: "release_to_payroll",
+        calldata: safeCalldata
+      };
+
+      const tx = await account.execute([releaseCall]);
+      console.log("🔥 FORCE SETTLED 🔥 Hash:", tx.transaction_hash);
+
+      // 5. Update Supabase to close the order
+      await supabase.from('orders').update({ 
+        status: 'closed', 
+        settlement_tx_hash: tx.transaction_hash 
+      }).eq('id', orderToSettle.id);
+
+      alert("Order Force Settled with 5-Star Ratings!");
+
+    } catch (err) {
+      console.error("Crash during force settle:", err);
+      alert("Something went wrong: " + err.message);
+      const btn = document.getElementById(`settle-btn-${orderToSettle.id}`);
+      if (btn) btn.innerText = "Force Settle";
+    }
   };
 
   // Sort active orders so oldest KOTs are at the top
@@ -304,10 +381,20 @@ const completedOrders = orders.filter(o => ['completed', 'closed'].includes(o.st
                           <td className="p-4 font-black text-violet-700">{order.total_amount.toFixed(2)} USDC</td>
                           {/* 🔥 UPDATED TO MATCH YOUR DATABASE COLUMN */}
   <td className="p-4">
-     <BlockConfirmations 
+    {order.status === 'completed' && !order.settlement_tx_hash ? (
+      <button
+        id={`settle-btn-${order.id}`}
+        onClick={() => handleForceSettle(order)}
+        className="bg-red-100 text-red-700 hover:bg-red-200 text-xs font-black uppercase tracking-wider px-3 py-2 rounded-lg transition-colors shadow-sm"
+      >
+        Force Settle
+      </button>
+    ) : (
+      <BlockConfirmations 
         hash={order.settlement_tx_hash} 
         closedAt={order.created_at} 
-     />
+      />
+    )}
   </td>
                           
                           {/* Chef Column */}

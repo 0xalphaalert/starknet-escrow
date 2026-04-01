@@ -1,19 +1,17 @@
-import Login from './Login.jsx';
-import Kitchen from './Kitchen.jsx';
-import './App.css'; 
+import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import Menu from './Menu';       
+import Kitchen from './Kitchen'; 
 
-function App() {
-  // If the URL ends in /kitchen, show the Restaurant Dashboard
-  if (window.location.pathname === '/kitchen') {
-    return <Kitchen />;
-  }
-
-  // Otherwise, show the normal Customer App
+export default function App() {
   return (
-    <main>
-      <Login />
-    </main>
+    <Router>
+      <Routes>
+        {/* Customer Menu loads on the default URL */}
+        <Route path="/" element={<Menu />} />
+        
+        {/* Kitchen Dashboard loads when you add /kitchen */}
+        <Route path="/kitchen" element={<Kitchen />} />
+      </Routes>
+    </Router>
   );
 }
-
-export default App;

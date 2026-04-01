@@ -6,7 +6,7 @@ import { RpcProvider, Contract, uint256, validateAndParseAddress, cairo } from "
 import {
   Search, Heart, ShoppingBag, Minus, Plus, X, ChevronRight, MapPin, Star, Clock, CheckCircle, Receipt
 } from 'lucide-react';
-import { StarkZap } from "starkzap";
+import { StarkZap, OnboardStrategy } from "starkzap";
 
 const CATEGORIES = [
   { id: 'burger', label: 'Burgers', icon: '🍔' },
@@ -46,7 +46,7 @@ const CookingTimer = () => {
 };
 
 export default function Menu() {
-  const { user } = usePrivy();
+  const { user, authenticated, ready } = usePrivy();
   const [menuItems, setMenuItems] = useState([]);
   const [staffList, setStaffList] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -66,6 +66,10 @@ export default function Menu() {
   // NEW: History States
   const [showHistory, setShowHistory]       = useState(false);
   const [orderHistory, setOrderHistory]     = useState([]);
+
+  // 🔥 NEW: StarkZap Cartridge States
+  const [starkzapWallet, setStarkzapWallet] = useState(null);
+
 
   // Fetch Data & Handle Auto-Resume
   useEffect(() => {
@@ -164,159 +168,156 @@ export default function Menu() {
       company_profit: finalCompanyProfit, payouts: walletPayouts 
     };
   };
+  // 🔥 NEW: Helper to send the welcome email via Supabase Edge Functions
+  const sendWalletDetailsEmail = async (userEmail, walletAddress) => {
+    try {
+      console.log(`Sending Welcome Email to ${userEmail} for wallet ${walletAddress}...`);
+      
+      await supabase.functions.invoke('send-welcome-email', {
+        body: { email: userEmail, wallet: walletAddress }
+      });
+      
+      console.log("Welcome email triggered successfully!");
+    } catch (error) {
+      console.error("Failed to trigger welcome email:", error);
+    }
+  };
 
   const handleCheckout = async () => {
-  if (cart.length === 0) return;
-  setIsProcessing(true);
+    if (cart.length === 0) return;
+    setIsProcessing(true);
 
-  try {
- // STEP A: Connect to the user's StarkNet wallet (Argent / Braavos)
-    const starknet = window.starknet;
+    try {
+      const USDC_ADDRESS = "0x0512feAc6339Ff7889822cb5aA2a86C848e9D392bB0E3E237C008674feeD8343";
+      const RESTAURANT_WALLET = validateAndParseAddress("0x0066730A1ad22Ac3e108C6D67ed585A016456B04d2d631aee5489CD9504e79fE");
 
-    if (!starknet) {
-      alert("Argent X not found. Please install it from https://www.argent.xyz/argent-x/");
-      setIsProcessing(false);
-      return;
-    }
+      const amountInMicroUSDC = BigInt(Math.round(parseFloat(finalTotal) * 1_000_000));
+      const amountUint256 = uint256.bnToUint256(amountInMicroUSDC);
+      const onChainOrderId = Math.floor(Date.now() / 1000);
 
-    // Force the wallet to fully connect
-    await starknet.enable();
-    const account = starknet.account;
+      let pickupCode = Math.random().toString(36).slice(2, 6).toUpperCase();
 
-    if (!account) {
-      alert("Wallet connection failed. Please unlock your Argent X wallet.");
-      setIsProcessing(false);
-      return;
-    }
+      if (paymentMethod === 'starkzap') {
+        let activeWallet = starkzapWallet;
+        if (!activeWallet) {
+          const sdk = new StarkZap({ network: "sepolia" });
+          
+          const sessionPolicies = [
+            { target: USDC_ADDRESS, method: "approve" },
+            { target: ESCROW_ADDRESS, method: "deposit" }
+          ];
 
+          const { wallet } = await sdk.onboard({ 
+            strategy: OnboardStrategy.Cartridge,
+            options: { policies: sessionPolicies }
+          });
+          
+          activeWallet = wallet;
+          setStarkzapWallet(wallet);
 
+          // 🔥 NEW: Trigger the email silently in the background on first creation!
+          const userEmail = user?.email?.address || user?.google?.email;
+          if (userEmail && wallet?.account?.address) {
+             sendWalletDetailsEmail(userEmail, wallet.account.address);
+          }
+        }
 
+        console.log(`[StarkZap] Executing background payment via Cartridge...`);
 
-    // STEP C: USDC contract on Starknet Sepolia testnet
-    const USDC_ADDRESS = "0x0512feAc6339Ff7889822cb5aA2a86C848e9D392bB0E3E237C008674feeD8343";
-    const RESTAURANT_WALLET = validateAndParseAddress(
-      "0x0066730A1ad22Ac3e108C6D67ed585A016456B04d2d631aee5489CD9504e79fE"
-    );
-  
+        // 🔥 THE SILENT MULTI-CALL: Groups Approve + Deposit into ONE background call
+        const tx = await activeWallet.execute([
+          {
+            contractAddress: USDC_ADDRESS,
+            entrypoint: "approve",
+            calldata: [ESCROW_ADDRESS, amountUint256.low.toString(), amountUint256.high.toString()]
+          },
+          {
+            contractAddress: ESCROW_ADDRESS,
+            entrypoint: "deposit",
+            calldata: [onChainOrderId.toString(), amountUint256.low.toString(), amountUint256.high.toString()]
+          }
+        ]);
 
-    // USDC has 6 decimals — convert the dollar amount correctly
-    const amountInMicroUSDC = BigInt(Math.round(parseFloat(finalTotal) * 1_000_000));
-    const amountUint256 = uint256.bnToUint256(amountInMicroUSDC);
-
-    // 🔥 FIX: Define the order ID globally for the whole transaction right here!
-    const onChainOrderId = Math.floor(Date.now() / 1000);
-
-    if (paymentMethod === 'starkzap') {
-      console.log(`[StarkNet] Sending ${finalTotal} USDC on Sepolia...`);
-
-      // 1. APPROVE the Escrow contract to pull the USDC
-      const approveCall = {
-        contractAddress: USDC_ADDRESS,
-        entrypoint: "approve",
-        calldata: [
-          ESCROW_ADDRESS, 
-          amountUint256.low.toString(), 
-          amountUint256.high.toString()
-        ]
-      };
-
-      // (The ID is now generated at the top of the function)
-      const depositCall = {
-        contractAddress: ESCROW_ADDRESS,
-        entrypoint: "deposit",
-        calldata: [
-          onChainOrderId.toString(), // Safely uses the global variable
-          amountUint256.low.toString(), 
-          amountUint256.high.toString()
-        ]
-      };
-
-      /// 3. MULTICALL: Execute Approve and Deposit at the exact same time!
-      const tx = await account.execute([approveCall, depositCall]);
+        console.log("✅ Silent Transaction Confirmed:", tx.transaction_hash);
+        
+        // Set the pickup code to the first 4 characters of the session wallet address
+        pickupCode = activeWallet.account?.address?.slice(2, 6).toUpperCase() || pickupCode;
       
-      console.log("Tx sent to mempool! Skipping wait for demo...", tx.transaction_hash);
-      
-      // 2. 🔥 THIS IS COMMENTED OUT SO THE APP MOVES INSTANTLY
-      // await account.waitForTransaction(tx.transaction_hash);
 
-    } else if (paymentMethod === 'copperx') {
-      console.log(`[CopperX] Fiat on-ramp — simulated for demo`);
-      // In production: redirect to your CopperX hosted checkout URL
-      // window.location.href = "https://pay.copperx.io/session_xxxxx";
-      await new Promise(resolve => setTimeout(resolve, 3000));
+      } else if (paymentMethod === 'copperx') {
+        console.log(`[CopperX] Fiat on-ramp — simulated for demo`);
+        await new Promise(resolve => setTimeout(resolve, 3000));
 
-    } else if (paymentMethod === 'zklend') {
-      console.log(`[zkLend] Borrowing ${finalTotal} USDC via zkLend Sepolia...`);
+      } else if (paymentMethod === 'zklend') {
+        console.log(`[zkLend] Borrowing ${finalTotal} USDC via zkLend Sepolia...`);
+        
+        // Fallback to standard Argent X popup for zkLend
+        const starknet = window.starknet;
+        if (!starknet) throw new Error("Argent X not found. Please install it.");
+        await starknet.enable();
+        const account = starknet.account;
+        pickupCode = account.address ? account.address.slice(0, 4).toUpperCase() : pickupCode;
 
-      // zkLend Market contract on Sepolia
-      const ZKLEND_MARKET = "0x04c0a5193d58f74fbace4b74dcf65481e734ed1714121bdc571da345540efa05";
+        const ZKLEND_MARKET = "0x04c0a5193d58f74fbace4b74dcf65481e734ed1714121bdc571da345540efa05";
 
-      // 1. Approve zkLend to pull USDC as collateral (if you have collateral deposited)
-      const approveCall = {
-        contractAddress: USDC_ADDRESS,
-        entrypoint: "approve",
-        calldata: [ZKLEND_MARKET, amountUint256.low, amountUint256.high],
-      };
+        const approveCall = {
+          contractAddress: USDC_ADDRESS,
+          entrypoint: "approve",
+          calldata: [ZKLEND_MARKET, amountUint256.low, amountUint256.high],
+        };
 
-      // 2. Borrow USDC from zkLend
-      const borrowCall = {
-        contractAddress: ZKLEND_MARKET,
-        entrypoint: "borrow",
-        calldata: [USDC_ADDRESS, amountUint256.low, amountUint256.high],
-      };
+        const borrowCall = {
+          contractAddress: ZKLEND_MARKET,
+          entrypoint: "borrow",
+          calldata: [USDC_ADDRESS, amountUint256.low, amountUint256.high],
+        };
 
-      // 3. Transfer borrowed USDC to restaurant
-      const transferCall = {
-        contractAddress: USDC_ADDRESS,
-        entrypoint: "transfer",
-        calldata: [RESTAURANT_WALLET, amountUint256.low, amountUint256.high],
-      };
+        const transferCall = {
+          contractAddress: USDC_ADDRESS,
+          entrypoint: "transfer",
+          calldata: [RESTAURANT_WALLET, amountUint256.low, amountUint256.high],
+        };
 
-      // Execute all 3 calls as one multicall transaction
-      const tx = await account.execute([approveCall, borrowCall, transferCall]);
-      await provider.waitForTransaction(tx.transaction_hash);
-      console.log("✅ zkLend + Transfer confirmed:", tx.transaction_hash);
+        const tx = await account.execute([approveCall, borrowCall, transferCall]);
+        console.log("✅ zkLend + Transfer confirmed:", tx.transaction_hash);
+      }
+
+      // STEP D: Save confirmed order to Supabase
+      const customerName = user?.google?.name || user?.email?.address || 'Guest';
+
+      const { data, error } = await supabase.from('orders').insert([{
+        table_number: 0,
+        items: cart,
+        total_amount: parseFloat(finalTotal),
+        payment_method: paymentMethod,
+        status: 'pending_kitchen',
+        customer_name: customerName,
+        customer_wallet: pickupCode,
+        on_chain_id: onChainOrderId
+      }]).select().single();
+
+      if (!error) {
+        setCurrentOrder(data);
+        setShowCheckout(false);
+        setIsPaid(true);
+
+        supabase.channel(`order-${data.id}`)
+          .on('postgres_changes', {
+            event: 'UPDATE', schema: 'public',
+            table: 'orders', filter: `id=eq.${data.id}`
+          }, (payload) => { setCurrentOrder(payload.new); })
+          .subscribe();
+      } else {
+        console.error("Supabase Order Failed", error);
+      }
+
+    } catch (error) {
+      console.error("Transaction Failed:", error);
+      alert("Payment failed or was rejected. Error: " + error.message);
+    } finally {
+      setIsProcessing(false);
     }
-
-    // STEP D: Save confirmed order to Supabase
-    const customerName = user?.google?.name || user?.email?.address || 'Guest';
-    const pickupCode = account.address
-      ? account.address.slice(0, 4).toUpperCase()
-      : Math.random().toString(36).slice(2, 6).toUpperCase();
-
-    const { data, error } = await supabase.from('orders').insert([{
-      table_number: 0,
-      items: cart,
-      total_amount: parseFloat(finalTotal),
-      payment_method: paymentMethod,
-      status: 'pending_kitchen',
-      customer_name: customerName,
-      customer_wallet: pickupCode,
-      on_chain_id: onChainOrderId
-    }]).select().single();
-
-    if (!error) {
-      setCurrentOrder(data);
-      setShowCheckout(false);
-      setIsPaid(true);
-
-      supabase.channel(`order-${data.id}`)
-        .on('postgres_changes', {
-          event: 'UPDATE', schema: 'public',
-          table: 'orders', filter: `id=eq.${data.id}`
-        }, (payload) => { setCurrentOrder(payload.new); })
-        .subscribe();
-    } else {
-      console.error("Supabase Order Failed", error);
-    }
-
-  } catch (error) {
-    console.error("Transaction Failed:", error);
-    alert("Payment failed or was rejected. Error: " + error.message);
-  } finally {
-    setIsProcessing(false);
-  }
-};
+  };
 
   if (loading) return <div className="min-h-screen flex items-center justify-center font-bold text-violet-600">Loading StakServe...</div>;
 
